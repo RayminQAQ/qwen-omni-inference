@@ -1,0 +1,14 @@
+# Recommended installation steps
+pip install transformers accelerate torch soundfile qwen-omni-utils[decord] -U
+# Install the specific transformers version
+pip install git+https://github.com/huggingface/transformers@v4.51.3-Qwen2.5-Omni-preview
+
+pip install torchvision
+conda install -c conda-forge ffmpeg
+conda install librosa
+pip install datasets 
+# ??
+pip install flash-attn --no-build-isolation
+
+# INT4
+pip install gptqmodel==2.0.0
