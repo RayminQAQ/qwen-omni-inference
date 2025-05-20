@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 import torch
 import soundfile as sf
 from transformers import Qwen2_5OmniForConditionalGeneration, Qwen2_5OmniProcessor
+from transformers import AutoProcessor, AutoModelForTextToWaveform
 from qwen_omni_utils import process_mm_info
 from transformers import set_seed
 import random
@@ -182,18 +183,24 @@ def load_data(dataset_name_or_path: str,
 
 def load_model(model_name_or_path: str):
     # Error checking
-    if model_name_or_path not in ["Qwen/Qwen2.5-Omni-7B", "Qwen/Qwen2.5-Omni-3B"]:
+    if model_name_or_path not in ["Qwen/Qwen2.5-Omni-7B", "Qwen/Qwen2.5-Omni-3B", "Qwen/Qwen2.5-Omni-7B-GPTQ-Int4", "Qwen/Qwen2.5-Omni-7B-AWQ"]:
         raise ValueError(f"Invalid model name: {model_name_or_path}. Please use 'Qwen/Qwen2.5-Omni-7B' or 'Qwen/Qwen2.5-Omni-3B'.")
 
     # Load with optimizations
     print(f"Loading {model_name_or_path}")
+    if model_name_or_path == "Qwen/Qwen2.5-Omni-7B-AWQ":
+        processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-Omni-7B-AWQ")
+        model = AutoModelForTextToWaveform.from_pretrained("Qwen/Qwen2.5-Omni-7B-AWQ")
+        return model, processor
     
     model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
         model_name_or_path,
         torch_dtype=torch.bfloat16, # Use BF16
+        load_in_4bit=True,
         device_map="auto",         # Auto-distribute across GPUs
         #attn_implementation="flash_attention_2" # Use Flash Attention 2
     )
+    model.disable_talker()
     processor = Qwen2_5OmniProcessor.from_pretrained(model_name_or_path)
     return model, processor
 
@@ -210,7 +217,7 @@ def main():
     USE_AUDIO_IN_VIDEO_FLAG = False
     dataset_name_or_path = "TOCFL-MultiBench/TOCFL-MultiBench.json"
     prompt_template_path = "prompt/base.txt"
-    model_name_or_path = "Qwen/Qwen2.5-Omni-3B" # str["Qwen/Qwen2.5-Omni-7B" | "Qwen/Qwen2.5-Omni-3B"]
+    model_name_or_path = "Qwen/Qwen2.5-Omni-3B" # str["Qwen/Qwen2.5-Omni-7B" | "Qwen/Qwen2.5-Omni-3B" | "Qwen/Qwen2.5-Omni-7B-GPTQ-Int4" | "Qwen/Qwen2.5-Omni-7B-AWQ"]
     max_new_tokens = 1
     #tensor_type = "bf16" # "bf16", "auto"
     
@@ -225,8 +232,14 @@ def main():
     results = []
     all_response = []
     all_answers = []
+    OOM = []
     
-    for data in tqdm(dataset, desc="Evaluating"): 
+    start_idx = 170 # DEBUG
+    #for data in tqdm(dataset, desc="Evaluating"): 
+    for idx, data in enumerate(tqdm(dataset, desc="Evaluating")):
+        if idx < start_idx:
+            continue   # DEBUG
+        
         """ Load Template: 在 dataset 加入一個欄位叫做 template_response """
         chat_template = get_template_response(image_path=data["image"], audio_path=data["audio"], question=data["question"])
         text_prompt_vc = processor.apply_chat_template(chat_template, add_generation_prompt=True, tokenize=False)
@@ -234,20 +247,41 @@ def main():
         input_token = processor(
             text=text_prompt_vc, audio=audios_vc, images=image_vc,
             return_tensors="pt", padding=True,
-            #use_audio_in_video=USE_AUDIO_IN_VIDEO_FLAG
+            use_audio_in_video=USE_AUDIO_IN_VIDEO_FLAG
         )
         input_token = input_token.to(model.device).to(model.dtype)
         
+        del chat_template
+        del text_prompt_vc
+        del audios_vc
+        del image_vc
+        
         """ Inference """
-        with torch.no_grad():
-            text_ids = model.generate(
-                **input_token,
-                use_audio_in_video=USE_AUDIO_IN_VIDEO_FLAG,
-                return_audio=False,
-                max_new_tokens=max_new_tokens # Allow longer solutions
-            )
-        text_response = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
-        print(text_response)
+        # print(data["id"])
+        # if data["id"] in ["01-L-C-P2-050", "01-L-C-P2-049"]:
+        #     continue
+        try:
+            with torch.no_grad():
+                text_ids = model.generate(
+                    **input_token,
+                    return_audio=False,
+                    use_audio_in_video=USE_AUDIO_IN_VIDEO_FLAG,
+                    max_new_tokens=max_new_tokens, # Allow longer solutions
+                    thinker_max_new_tokens = 1, # DEBUG
+                    talker_max_new_tokens = 1, # DEBUG
+                    #num_beams=1,
+                )
+            text_response = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+            # 只捕捉 CUDA OOM 的錯誤
+            if "out of memory" in str(e).lower():
+                print(f"[WARN] OOM at idx={idx}, id={data['id']}, setting response to empty.")
+                clear_resources("")  # 清理快取
+                text_response = ""
+                OOM.append(data["id"])
+            else:
+                # 如果不是 OOM，還是往上丟錯誤
+                raise
         
         """ Save result"""
         all_response.extend(text_response)
@@ -270,7 +304,7 @@ def main():
     
     print(f"Metrics: {metrics}")
     print(f"Results: {results}")
-    
+    print(f"OOM: {OOM}")
     """ Save results """
     
 if __name__ == "__main__":
