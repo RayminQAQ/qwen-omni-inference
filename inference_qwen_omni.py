@@ -16,6 +16,9 @@ import random
 import numpy as np
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
+# For resize image
+from PIL import Image
+
 def clear_resources(name: str) -> None:
     # if hasattr(self, name):
     #     delattr(self, name)
@@ -196,7 +199,8 @@ def load_model(model_name_or_path: str):
     model = Qwen2_5OmniForConditionalGeneration.from_pretrained(
         model_name_or_path,
         torch_dtype=torch.bfloat16, # Use BF16
-        load_in_4bit=True,
+        # load_in_4bit=True,
+
         device_map="auto",         # Auto-distribute across GPUs
         #attn_implementation="flash_attention_2" # Use Flash Attention 2
     )
@@ -234,16 +238,25 @@ def main():
     all_answers = []
     OOM = []
     
-    start_idx = 170 # DEBUG
-    #for data in tqdm(dataset, desc="Evaluating"): 
+    audio_reponse = []
+    audio_answers = []
+    image_response = []
+    image_answers = []
+    
+    strat_time = time.time()
     for idx, data in enumerate(tqdm(dataset, desc="Evaluating")):
-        if idx < start_idx:
-            continue   # DEBUG
-        
         """ Load Template: 在 dataset 加入一個欄位叫做 template_response """
         chat_template = get_template_response(image_path=data["image"], audio_path=data["audio"], question=data["question"])
         text_prompt_vc = processor.apply_chat_template(chat_template, add_generation_prompt=True, tokenize=False)
         audios_vc, image_vc, _ = process_mm_info(chat_template, use_audio_in_video=USE_AUDIO_IN_VIDEO_FLAG)
+        
+        # Resize image
+        if image_vc is not None:
+            image_vc = [
+                Image.new("RGB", (224, 224))
+                for _ in image_vc
+            ]
+        
         input_token = processor(
             text=text_prompt_vc, audio=audios_vc, images=image_vc,
             return_tensors="pt", padding=True,
@@ -260,18 +273,27 @@ def main():
         # print(data["id"])
         # if data["id"] in ["01-L-C-P2-050", "01-L-C-P2-049"]:
         #     continue
+        OutOfMemory = False
         try:
+            input_len = input_token["input_ids"].shape[-1]
             with torch.no_grad():
                 text_ids = model.generate(
                     **input_token,
                     return_audio=False,
                     use_audio_in_video=USE_AUDIO_IN_VIDEO_FLAG,
                     max_new_tokens=max_new_tokens, # Allow longer solutions
-                    thinker_max_new_tokens = 1, # DEBUG
-                    talker_max_new_tokens = 1, # DEBUG
+                    # thinker_max_new_tokens = 1, # DEBUG
+                    # talker_max_new_tokens = 1, # DEBUG
                     #num_beams=1,
                 )
-            text_response = processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+                
+                generated_ids = text_ids[:, input_len:]
+                text_response = processor.batch_decode(
+                    generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+                )[0]
+                
+                # print(text_response)
+                
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
             # 只捕捉 CUDA OOM 的錯誤
             if "out of memory" in str(e).lower():
@@ -279,33 +301,96 @@ def main():
                 clear_resources("")  # 清理快取
                 text_response = ""
                 OOM.append(data["id"])
+                OutOfMemory = True
             else:
                 # 如果不是 OOM，還是往上丟錯誤
                 raise
         
         """ Save result"""
-        all_response.extend(text_response)
-        all_answers.extend(data["answer"])
+        all_response.append(text_response)
+        all_answers.append(data["answer"])
         results.extend([
             {
                 "id": data["id"],
                 "question": data["question"],
                 "generation": text_response,
                 "answer": data["answer"],
+                "OOM": OutOfMemory,
             }
         ])
         
+        """ Save audio and image response """
+        if data["audio"] is not None:
+            audio_reponse.append(text_response)
+            audio_answers.append(data["answer"])
+        if data["image"] is not None:
+            image_response.append(text_response)
+            image_answers.append(data["answer"])
+            
+    total_time = time.time() - strat_time
+    
     """ Calculate metrics """
-    metrics = calculate_metrics(
+    idx2letter = {str(i): c for i, c in enumerate(["A","B","C","D"])}
+    letter_answers = [idx2letter[a] for a in all_answers ]
+    
+    all_metrics = calculate_metrics(
         all_choices=["A", "B", "C", "D"],
-        all_answers=all_answers,
+        all_answers=letter_answers,
         all_response=all_response,
     )
     
-    print(f"Metrics: {metrics}")
-    print(f"Results: {results}")
-    print(f"OOM: {OOM}")
+    idx2letter = {str(i): c for i, c in enumerate(["A","B","C","D"])}
+    letter_answers = [idx2letter[a] for a in image_answers ]
+    image_metrics = calculate_metrics(
+        all_choices=["A", "B", "C", "D"],
+        all_answers=letter_answers,
+        all_response=image_response,
+    )
+    
+    idx2letter = {str(i): c for i, c in enumerate(["A","B","C","D"])}
+    letter_answers = [idx2letter[a] for a in audio_answers ]
+    audio_metrics = calculate_metrics(
+        all_choices=["A", "B", "C", "D"],
+        all_answers=letter_answers,
+        all_response=audio_reponse,
+    )
+    
+    """ Print results """
+    print(f"Overll Metrics: {all_metrics}")
+    print(f"Audio metrics: {audio_metrics}")
+    print(f"Image metrics: {image_metrics}")
+    print(f"Total time: {total_time} seconds")
+    
     """ Save results """
+    output_dir = Path("output")
+    output_dir.mkdir(exist_ok=True)
+
+    # 1. 儲存詳細的 generation 結果為 JSON
+    import json
+    with open(output_dir / "results.json", "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=4)
+
+    # 2. 儲存整體／影像／語音的指標為 JSON
+    metrics_summary = {
+        "overall": all_metrics,
+        "audio": audio_metrics,
+        "image": image_metrics,
+        "total_time": total_time,
+    }
+    with open(output_dir / "metrics.json", "w", encoding="utf-8") as f:
+        json.dump(metrics_summary, f, ensure_ascii=False, indent=4)
+
+    # 3. （可選）也把每條 sample 的結果存成 CSV，方便快速瀏覽
+    import csv
+    with open(output_dir / "results.csv", "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["id", "question", "generation", "answer"])
+        writer.writeheader()
+        writer.writerows(results)
+
+    print(f"✅ Saved {len(results)} samples to {output_dir}/results.json and results.csv")
+    print(f"✅ Saved metrics summary to {output_dir}/metrics.json")
+    # print(f"✅ OOM samples: {OOM}")
+    # print(f"✅ OOM size: {len(OOM)}")
     
 if __name__ == "__main__":
     set_seed(11207330)
