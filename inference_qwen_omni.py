@@ -208,14 +208,6 @@ def load_model(model_name_or_path: str):
     processor = Qwen2_5OmniProcessor.from_pretrained(model_name_or_path)
     return model, processor
 
-def evaluate(model, processor, dataset):
-    ###############
-    start_time = time.time()
-    """ write your evaluation code here"""
-    end_time = time.time()
-    ###############
-    pass
-
 def main():
     """ Parameter """
     USE_AUDIO_IN_VIDEO_FLAG = False
