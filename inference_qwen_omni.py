@@ -270,41 +270,39 @@ def main():
         del image_vc
         
         """ Inference """
-        # print(data["id"])
-        # if data["id"] in ["01-L-C-P2-050", "01-L-C-P2-049"]:
-        #     continue
-        OutOfMemory = False
-        try:
-            input_len = input_token["input_ids"].shape[-1]
-            with torch.no_grad():
-                text_ids = model.generate(
-                    **input_token,
-                    return_audio=False,
-                    use_audio_in_video=USE_AUDIO_IN_VIDEO_FLAG,
-                    max_new_tokens=max_new_tokens, # Allow longer solutions
-                    # thinker_max_new_tokens = 1, # DEBUG
-                    # talker_max_new_tokens = 1, # DEBUG
-                    #num_beams=1,
-                )
-                
-                generated_ids = text_ids[:, input_len:]
-                text_response = processor.batch_decode(
-                    generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
-                )[0]
+        
+        # OutOfMemory = False
+        # try:
+        input_len = input_token["input_ids"].shape[-1]
+        with torch.no_grad():
+            text_ids = model.generate(
+                **input_token,
+                return_audio=False,
+                use_audio_in_video=USE_AUDIO_IN_VIDEO_FLAG,
+                max_new_tokens=max_new_tokens, # Allow longer solutions
+                # thinker_max_new_tokens = 1, # DEBUG
+                # talker_max_new_tokens = 1, # DEBUG
+                #num_beams=1,
+            )
+            
+            generated_ids = text_ids[:, input_len:]
+            text_response = processor.batch_decode(
+                generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False
+            )[0]
                 
                 # print(text_response)
                 
-        except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
-            # 只捕捉 CUDA OOM 的錯誤
-            if "out of memory" in str(e).lower():
-                print(f"[WARN] OOM at idx={idx}, id={data['id']}, setting response to empty.")
-                clear_resources("")  # 清理快取
-                text_response = ""
-                OOM.append(data["id"])
-                OutOfMemory = True
-            else:
-                # 如果不是 OOM，還是往上丟錯誤
-                raise
+        # except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+        #     # 只捕捉 CUDA OOM 的錯誤
+        #     if "out of memory" in str(e).lower():
+        #         print(f"[WARN] OOM at idx={idx}, id={data['id']}, setting response to empty.")
+        #         clear_resources("")  # 清理快取
+        #         text_response = ""
+        #         OOM.append(data["id"])
+        #         OutOfMemory = True
+        #     else:
+        #         # 如果不是 OOM，還是往上丟錯誤
+        #         raise
         
         """ Save result"""
         all_response.append(text_response)
@@ -315,7 +313,7 @@ def main():
                 "question": data["question"],
                 "generation": text_response,
                 "answer": data["answer"],
-                "OOM": OutOfMemory,
+                # "OOM": OutOfMemory,
             }
         ])
         
